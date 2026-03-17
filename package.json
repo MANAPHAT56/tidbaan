@@ -1,6 +1,7 @@
 {
   "name": "tidbaan",
   "private": true,
+   "homepage": "https://MANAPHAT56.github.io/tidbaan",
   "version": "0.0.0",
   "type": "module",
   "scripts": {
