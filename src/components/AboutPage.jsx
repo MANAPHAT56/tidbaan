@@ -47,7 +47,7 @@ export default function AboutPage() {
       titleTh: "การเดินทาง",
       titleEn: "Getting Here",
       detailTh: "มีที่จอดรถ 2 คัน(มอเตอร์ไซต์)\nสั่งอาหารที่เคาน์เตอร์",
-      detailEn: "2 parking spaces\nOrder at the counter",
+      detailEn: "2 parking spaces (motorcycle)\nOrder at the counter",
     },
   ];
 

@@ -188,7 +188,7 @@ export default function HomePage({ setPage, menu, addToCart, onItemClick }) {
                 <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" />
               </svg>
             ),
-            text: lang === "th" ? "ถ.สุขุมวิท" : "Sukhumvit Rd.",
+            text: lang === "th" ? "หน้าคอนโดลุมพินี ถ.สุขุมวิท" : "Lumpini Condo, Sukhumvit Rd.",
           },
           {
             icon: (
