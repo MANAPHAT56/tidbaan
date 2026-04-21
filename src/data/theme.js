@@ -1,0 +1,61 @@
+/* ─── Theme Tokens ─────────────────────────────────────────────────────────── */
+
+export function getThemeVars(theme) {
+  const light = {
+    "--bg": "#faf5ee",
+    "--bg2": "#f2e9d8",
+    "--bg3": "#fff",
+    "--surface": "#ffffff",
+    "--surfaceHover": "#fdf6e8",
+    "--border": "#e8d9c0",
+    "--text": "#1c1008",
+    "--text2": "#5a3e28",
+    "--text3": "#9c7a56",
+    "--gold": "#c8860a",
+    "--goldBright": "#f5c842",
+    "--amber": "#b85c00",
+    "--navBg": "#1c1008",
+    "--navText": "#e8d5b0",
+    "--tagBg": "#1c1008",
+    "--tagText": "#f5c842",
+    "--badgeBg": "#dc2626",
+    "--badgeText": "#fff",
+    "--drawerBg": "#faf5ee",
+    "--shadow": "rgba(28,16,8,0.10)",
+    "--shadowDeep": "rgba(28,16,8,0.18)",
+    "--divider": "#e0cdb0",
+    "--heroStart": "#1c1008",
+    "--heroMid": "#3d1a00",
+    "--inputBg": "#f2e9d8",
+  };
+
+  const dark = {
+    "--bg": "#0e0905",
+    "--bg2": "#1a1008",
+    "--bg3": "#231508",
+    "--surface": "#1e1209",
+    "--surfaceHover": "#2a1a0e",
+    "--border": "#3d2710",
+    "--text": "#f0e4cc",
+    "--text2": "#c9a870",
+    "--text3": "#8a6a44",
+    "--gold": "#f5c842",
+    "--goldBright": "#fde68a",
+    "--amber": "#fb923c",
+    "--navBg": "#090503",
+    "--navText": "#c9a870",
+    "--tagBg": "#f5c842",
+    "--tagText": "#1c1008",
+    "--badgeBg": "#ef4444",
+    "--badgeText": "#fff",
+    "--drawerBg": "#0e0905",
+    "--shadow": "rgba(0,0,0,0.40)",
+    "--shadowDeep": "rgba(0,0,0,0.60)",
+    "--divider": "#3d2710",
+    "--heroStart": "#090503",
+    "--heroMid": "#1c0e04",
+    "--inputBg": "#1a1008",
+  };
+
+  return theme === "dark" ? dark : light;
+}
