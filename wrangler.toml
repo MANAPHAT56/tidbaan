@@ -1,0 +1,7 @@
+name = "food-order-worker"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Secret ต้องเซ็ตผ่าน CLI หรือ Dashboard:
+#   wrangler secret put LINE_NOTIFY_TOKEN
+# ห้ามใส่ token จริงในไฟล์นี้!
