@@ -2,8 +2,8 @@
 //  📦 Cloudflare Worker — Geofence + LINE + Table Number (ไทย)
 // ============================================================
 
-const SHOP_LAT = 13.3611;
-const SHOP_LNG = 100.9847;
+const SHOP_LAT = 13.355270;
+const SHOP_LNG = 100.985970;
 const RADIUS_KM = 0.1; // 50 เมตร
 
 // ─── Haversine ──────────────────────────────────────────────
