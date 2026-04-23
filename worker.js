@@ -4,7 +4,7 @@
 
 const SHOP_LAT = 13.3611;
 const SHOP_LNG = 100.9847;
-const RADIUS_KM = 5 // 50 เมตร
+const RADIUS_KM = 0.1; // 50 เมตร
 
 // ─── Haversine ──────────────────────────────────────────────
 function getDistance(lat1, lng1, lat2, lng2) {
