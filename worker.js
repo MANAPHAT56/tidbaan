@@ -1,10 +1,10 @@
 // ============================================================
-//  📦 Cloudflare Worker — Geofence + LINE + Table Number (ไทย)
+//  📦 Cloudflare Worker — Geofence + LINE + Google Sheets + Table Number
 // ============================================================
 
 const SHOP_LAT = 13.355270;
 const SHOP_LNG = 100.985970;
-const RADIUS_KM = 0.1; // 50 เมตร
+const RADIUS_KM = 0.1; // 10 km radius
 
 // ─── Haversine ──────────────────────────────────────────────
 function getDistance(lat1, lng1, lat2, lng2) {
@@ -32,6 +32,25 @@ function cors(body, status = 200) {
       "Access-Control-Max-Age": "86400",
     },
   });
+}
+
+// ─── Google Sheets ──────────────────────────────────────────
+async function sendToGoogleSheet(sheetUrl, cart, total, tableNumber) {
+  try {
+    const payload = {
+      cart: cart,
+      total: total,
+      table: tableNumber
+    };
+    
+    await fetch(sheetUrl, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    console.log("บันทึกลง Google Sheets สำเร็จ");
+  } catch (error) {
+    console.error("Google Sheets error:", error);
+  }
 }
 
 // ─── LINE Flex Message (ภาษาไทยล้วน) ──────────────────────
@@ -264,7 +283,7 @@ export default {
     const dist = getDistance(lat, lng, SHOP_LAT, SHOP_LNG);
     console.log(`ระยะทาง: ${dist} km (${Math.round(dist * 1000)} ม.) - โต๊ะ: ${finalTableNumber}`);
     
-    // RADIUS_KM = 0.05 = 50 เมตร
+    // RADIUS_KM = 0.1 = 100 เมตร
     if (dist > RADIUS_KM) {
       const distanceMeters = Math.round(dist * 1000);
       return cors(
@@ -299,6 +318,11 @@ export default {
         ok: false, 
         message: "ไม่สามารถส่งข้อความแจ้งเตือนได้ กรุณาลองใหม่" 
       }, 502);
+    }
+
+    // ─── ส่งข้อมูลไป Google Sheets (ถ้าตั้งค่า URL ไว้) ───
+    if (env.GOOGLE_SHEET_URL) {
+      await sendToGoogleSheet(env.GOOGLE_SHEET_URL, cart, total, finalTableNumber);
     }
 
     // สำเร็จ
