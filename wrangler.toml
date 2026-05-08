@@ -1,7 +1,22 @@
 name = "food-order-worker"
 main = "worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-01-01"
 
-# Secret ต้องเซ็ตผ่าน CLI หรือ Dashboard:
-#   wrangler secret put LINE_NOTIFY_TOKEN
-# ห้ามใส่ token จริงในไฟล์นี้!
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
+
+[[kv_namespaces]]
+binding = "ORDERS_KV"  # ต้องเป็น "ORDERS_KV" ตามที่ code เรียกใช้
+id = "2eb3f2dd87a7426e9b134e8fb4b06352"

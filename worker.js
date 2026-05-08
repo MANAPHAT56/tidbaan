@@ -1,25 +1,11 @@
 // ============================================================
 //  📦 Cloudflare Worker — Geofence + Stripe PromptPay + LINE
-//  Routes:
-//    POST /create-order      → ตรวจ GPS, สร้าง PaymentIntent (Stripe)
-//    GET  /payment-status    → ดูสถานะการโอน (polling จาก front-end)
-//    POST /payment-webhook   → รับ webhook จาก Stripe
-//    OPTIONS *               → CORS preflight
-//
-//  ENV vars ที่ต้องตั้งใน Cloudflare Dashboard:
-//    STRIPE_SECRET_KEY       → sk_live_xxxx  (หรือ sk_test_xxxx สำหรับ test)
-//    STRIPE_WEBHOOK_SECRET   → whsec_xxxx    (จาก Stripe Dashboard > Webhooks)
-//    ORDERS_KV               → KV namespace binding
-//    LINE_MESSAGING_TOKEN    → LINE channel access token
-//    LINE_USER_ID            → LINE user/group ID ที่จะรับแจ้งเตือน
-//    GOOGLE_SHEET_URL        → (optional) Apps Script URL
 // ============================================================
 
 const SHOP_LAT = 13.355270;
 const SHOP_LNG = 100.985970;
-const RADIUS_KM = 0.1; // 100 เมตร
+const RADIUS_KM = 1;
 
-// ─── Haversine ──────────────────────────────────────────────
 function getDistance(lat1, lng1, lat2, lng2) {
   const R = 6371;
   const toRad = (d) => (d * Math.PI) / 180;
@@ -31,7 +17,6 @@ function getDistance(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// ─── CORS ────────────────────────────────────────────────────
 function cors(body, status = 200) {
   const responseBody = status === 204 ? null : JSON.stringify(body);
   return new Response(responseBody, {
@@ -46,14 +31,12 @@ function cors(body, status = 200) {
   });
 }
 
-// ─── Generate Order ID ───────────────────────────────────────
 function genOrderId() {
   const ts = Date.now().toString(36).toUpperCase();
   const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
   return `ORD-${ts}-${rand}`;
 }
 
-// ─── KV helpers ─────────────────────────────────────────────
 async function saveOrder(kv, orderId, data) {
   await kv.put(orderId, JSON.stringify(data), { expirationTtl: 3600 });
 }
@@ -74,17 +57,9 @@ async function updateOrderStatus(kv, orderId, status, extra = {}) {
   return order;
 }
 
-// ─── Stripe: สร้าง PaymentIntent (PromptPay) ────────────────
-// Stripe PromptPay ต้องการ:
-//   - payment_method_types: ["promptpay"]
-//   - currency: "thb"
-//   - confirm: true  → ให้ Stripe สร้าง QR ทันที
-//   - payment_method: { type: "promptpay" }
-//   - return_url ไม่จำเป็นสำหรับ PromptPay แต่ Stripe บาง version บังคับ
 async function createStripePaymentIntent(secretKey, { orderId, total }) {
-  const amountSatang = Math.round(Number(total) * 100); // บาท → สตางค์
+  const amountSatang = Math.round(Number(total) * 100);
 
-  // Step 1: สร้าง PaymentIntent
   const piRes = await fetch("https://api.stripe.com/v1/payment_intents", {
     method: "POST",
     headers: {
@@ -98,7 +73,6 @@ async function createStripePaymentIntent(secretKey, { orderId, total }) {
       "metadata[orderId]": orderId,
       confirm: "true",
       "payment_method_data[type]": "promptpay",
-      // Stripe PromptPay บังคับต้องมี billing_details[email]
       "payment_method_data[billing_details][email]": "guest@order.local",
     }),
   });
@@ -109,20 +83,16 @@ async function createStripePaymentIntent(secretKey, { orderId, total }) {
   }
 
   const pi = await piRes.json();
+  console.log("Stripe PI created:", pi.id, "| metadata.orderId:", pi.metadata?.orderId);
 
-  // QR image URL อยู่ใน next_action
-  // next_action.type === "promptpay_display_qr_code"
   const qrImageUrl =
     pi?.next_action?.promptpay_display_qr_code?.image_url_png || null;
 
   return { paymentIntentId: pi.id, clientSecret: pi.client_secret, qrImageUrl };
 }
 
-// ─── Stripe: verify webhook signature ───────────────────────
-// Stripe ส่ง timestamp + signature ใน header "Stripe-Signature"
-// format: t=xxx,v1=xxx,v1=xxx
 async function verifyStripeSignature(secret, rawBody, header) {
-  if (!secret) return true; // dev mode: ข้ามถ้าไม่มี secret
+  if (!secret) return true;
   if (!header) return false;
 
   const parts = Object.fromEntries(header.split(",").map((p) => p.split("=")));
@@ -146,11 +116,9 @@ async function verifyStripeSignature(secret, rawBody, header) {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  // ป้องกัน timing attack ด้วย constant-time compare
   return signatures.some((s) => s === hex);
 }
 
-// ─── Google Sheets ───────────────────────────────────────────
 async function sendToGoogleSheet(sheetUrl, order) {
   try {
     await fetch(sheetUrl, { method: "POST", body: JSON.stringify(order) });
@@ -159,9 +127,11 @@ async function sendToGoogleSheet(sheetUrl, order) {
   }
 }
 
-// ─── LINE Flex Message ───────────────────────────────────────
 async function sendLineMessage(token, userId, order) {
-  if (!token || !userId) return false;
+  if (!token || !userId) {
+    console.error("LINE missing token or userId");
+    return false;
+  }
 
   const { cart, total, tableNumber, isTakeaway, phone, address, orderId, lat, lng } = order;
 
@@ -260,7 +230,11 @@ async function sendLineMessage(token, userId, order) {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(message),
     });
-    if (!res.ok) { console.error(`LINE error ${res.status}: ${await res.text()}`); return false; }
+    if (!res.ok) {
+      console.error(`LINE error ${res.status}: ${await res.text()}`);
+      return false;
+    }
+    console.log("LINE sent ok");
     return true;
   } catch (e) {
     console.error("LINE send error:", e);
@@ -268,9 +242,6 @@ async function sendLineMessage(token, userId, order) {
   }
 }
 
-// ════════════════════════════════════════════════════════════
-//  Main handler
-// ════════════════════════════════════════════════════════════
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -290,32 +261,34 @@ export default {
       return cors({ status: order.status, orderId, updatedAt: order.updatedAt });
     }
 
-    // ── POST /payment-webhook (Stripe) ───────────────────────
+    // ── POST /payment-webhook ────────────────────────────────
     if (request.method === "POST" && path === "/payment-webhook") {
       const rawBody = await request.text();
       const stripeSig = request.headers.get("stripe-signature");
 
-      // Verify Stripe signature (HMAC-SHA256)
+      // parse ก่อน verify เพื่อ log type
+      let event;
+      try { event = JSON.parse(rawBody); }
+      catch { return cors({ error: "invalid json" }, 400); }
+
+      console.log("webhook event type:", event.type);
+
       const valid = await verifyStripeSignature(env.STRIPE_WEBHOOK_SECRET, rawBody, stripeSig);
+      console.log("signature valid:", valid);
       if (!valid) {
         console.error("Stripe signature mismatch");
         return cors({ error: "invalid signature" }, 401);
       }
 
-      let event;
-      try { event = JSON.parse(rawBody); }
-      catch { return cors({ error: "invalid json" }, 400); }
-
-      // Stripe events ที่เราสนใจ
-      // payment_intent.succeeded          → โอนสำเร็จ ✅
-      // payment_intent.payment_failed     → ล้มเหลว ❌
-      // payment_intent.canceled           → ยกเลิก ❌
-
       const pi = event?.data?.object;
       const orderId = pi?.metadata?.orderId;
 
+      // *** log สำคัญ: ดูว่า metadata มี orderId จริงมั้ย ***
+      console.log("pi.id:", pi?.id);
+      console.log("orderId from metadata:", orderId);
+
       if (!orderId) {
-        console.error("Stripe webhook: missing orderId in metadata");
+        console.error("missing orderId in metadata");
         return cors({ error: "missing orderId in metadata" }, 400);
       }
 
@@ -330,18 +303,22 @@ export default {
       ) {
         status = "fail";
       } else {
-        // event อื่นๆ (processing, requires_action ฯลฯ) → ไม่ต้องทำอะไร
         return cors({ ok: true, ignored: true, type: event.type });
       }
 
+      console.log("updating KV orderId:", orderId, "→ status:", status);
       const order = await updateOrderStatus(env.ORDERS_KV, orderId, status, {
         paymentIntentId: pi.id,
         stripeStatus: pi.status,
       });
 
-      if (!order) return cors({ error: "order not found" }, 404);
+      // *** log ดูว่า KV หา order เจอมั้ย ***
+      console.log("order from KV:", order ? "found" : "NOT FOUND");
+
+      if (!order) return cors({ error: "order not found in KV" }, 404);
 
       if (status === "success") {
+        console.log("sending LINE + Sheet...");
         await sendLineMessage(env.LINE_MESSAGING_TOKEN, env.LINE_USER_ID, order);
         if (env.GOOGLE_SHEET_URL) {
           await sendToGoogleSheet(env.GOOGLE_SHEET_URL, { ...order, status });
@@ -367,7 +344,6 @@ export default {
         return cors({ message: "กรุณาระบุเบอร์โทรศัพท์", ok: false }, 400);
       }
 
-      // ตรวจระยะทาง
       const dist = getDistance(lat, lng, SHOP_LAT, SHOP_LNG);
       console.log(`ระยะทาง: ${(dist * 1000).toFixed(0)} ม. | โต๊ะ: ${tableNumber || "takeaway"}`);
 
@@ -384,8 +360,8 @@ export default {
       }
 
       const orderId = genOrderId();
+      console.log("creating order:", orderId);
 
-      // สร้าง Stripe PaymentIntent (PromptPay)
       let stripeResult;
       try {
         stripeResult = await createStripePaymentIntent(env.STRIPE_SECRET_KEY, { orderId, total });
@@ -396,7 +372,6 @@ export default {
 
       const { paymentIntentId, qrImageUrl } = stripeResult;
 
-      // บันทึก order ลง KV
       if (env.ORDERS_KV) {
         await saveOrder(env.ORDERS_KV, orderId, {
           orderId,
@@ -413,13 +388,16 @@ export default {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
+        console.log("KV saved:", orderId);
+      } else {
+        console.error("ORDERS_KV not configured! order NOT saved");
       }
 
       return cors({
         ok: true,
         orderId,
         paymentIntentId,
-        qrImageUrl,   // ← ส่งไปให้ front-end ใช้ <img src="qrImageUrl" /> ตรงๆ
+        qrImageUrl,
         message: `สร้างออร์เดอร์ ${orderId} สำเร็จ รอการชำระเงิน`,
       });
     }

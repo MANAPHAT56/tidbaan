@@ -3,7 +3,6 @@ import { useApp } from "../hooks/useApp";
 
 const WORKER_URL = "https://food-order-worker.ttpho5874.workers.dev";
 
-// ── QR Image จาก Stripe (ใช้ URL ตรงๆ ไม่ต้องสร้างเอง) ────
 function QRImage({ src, size = 220 }) {
   return (
     <img
@@ -27,25 +26,22 @@ export default function CartDrawer({
 }) {
   const { lang, baseFontSize } = useApp();
 
-  // ─── State ────────────────────────────────────────────────
   const [tableNumber, setTableNumber] = useState(null);
-  const [step, setStep] = useState("cart"); // cart | form | qr | success | fail
+  const [step, setStep] = useState("cart");
   const [checking, setChecking] = useState(false);
   const [geoError, setGeoError] = useState(null);
-
-  // Takeaway form
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
   const [formError, setFormError] = useState("");
-
-  // QR / payment
-  // ⬇️ เปลี่ยนจาก qrPayload (EMVCo string) → qrImageUrl (URL จาก Stripe)
   const [qrImageUrl, setQrImageUrl] = useState(null);
   const [orderId, setOrderId] = useState(null);
   const [paymentStatus, setPaymentStatus] = useState(null);
-  const pollingRef = useRef(null);
 
-  // ─── อ่านเลขโต๊ะจาก URL / localStorage ───────────────────
+  // ── pollingRef เก็บ interval ID ปัจจุบัน
+  const pollingRef = useRef(null);
+  // ── activeOrderRef เก็บ orderId ที่ "active" จริงๆ ป้องกัน stale closure
+  const activeOrderRef = useRef(null);
+
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const table = urlParams.get("table");
@@ -60,7 +56,15 @@ export default function CartDrawer({
 
   const isTakeaway = !tableNumber;
 
-  // ─── reset เมื่อปิด drawer ────────────────────────────────
+  // cleanup เมื่อ component unmount
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+      activeOrderRef.current = null;
+    };
+  }, []);
+
+  // reset เมื่อ ordered กลับเป็น false (ปิด drawer)
   useEffect(() => {
     if (!ordered) {
       setStep("cart");
@@ -72,40 +76,57 @@ export default function CartDrawer({
       setOrderId(null);
       setPaymentStatus(null);
       if (pollingRef.current) clearInterval(pollingRef.current);
+      pollingRef.current = null;
+      activeOrderRef.current = null;
     }
   }, [ordered]);
 
-  // ─── Polling ตรวจสถานะการโอน ──────────────────────────────
-  function startPolling(oid) {
+  function stopPolling() {
     if (pollingRef.current) clearInterval(pollingRef.current);
+    pollingRef.current = null;
+  }
+
+  function startPolling(oid) {
+    // หยุด interval เก่าทุกตัวก่อนเสมอ
+    stopPolling();
+
+    // บันทึก orderId ที่กำลัง active
+    activeOrderRef.current = oid;
+
     pollingRef.current = setInterval(async () => {
+      // ถ้า orderId เปลี่ยนไปแล้ว (เกิด order ใหม่) → หยุดตัวเองทันที
+      if (activeOrderRef.current !== oid) {
+        clearInterval(pollingRef.current);
+        return;
+      }
       try {
         const res = await fetch(`${WORKER_URL}/payment-status?orderId=${oid}`);
         const data = await res.json();
+        // double-check หลัง await เพราะ await ใช้เวลา
+        if (activeOrderRef.current !== oid) return;
+
         if (data.status === "success") {
-          clearInterval(pollingRef.current);
+          stopPolling();
           setPaymentStatus("success");
           setStep("success");
           setOrdered(true);
         } else if (data.status === "fail" || data.status === "expired") {
-          clearInterval(pollingRef.current);
+          stopPolling();
           setPaymentStatus("fail");
           setStep("fail");
         }
       } catch (_) {}
     }, 3000);
 
-    // หยุด polling หลัง 10 นาที (QR Stripe หมดอายุ ~10 นาที)
+    // หยุด polling หลัง 10 นาที
     setTimeout(() => {
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-        setPaymentStatus((prev) => (prev === null ? "fail" : prev));
-        setStep((prev) => (prev === "qr" ? "fail" : prev));
-      }
+      if (activeOrderRef.current !== oid) return;
+      stopPolling();
+      setPaymentStatus((prev) => (prev === null ? "fail" : prev));
+      setStep((prev) => (prev === "qr" ? "fail" : prev));
     }, 10 * 60 * 1000);
   }
 
-  // ─── สร้าง order + รับ QR URL จาก Stripe ─────────────────
   async function handleOrder() {
     setChecking(true);
     setGeoError(null);
@@ -145,11 +166,10 @@ export default function CartDrawer({
           const data = await res.json();
 
           if (res.ok && data.ok) {
-            // ⬇️ รับ qrImageUrl จาก Stripe (ไม่ต้องสร้าง QR เอง)
             setQrImageUrl(data.qrImageUrl);
             setOrderId(data.orderId);
             setStep("qr");
-            startPolling(data.orderId);
+            startPolling(data.orderId); // ส่ง orderId ใหม่เข้าไปตรงๆ ไม่ผ่าน state
           } else {
             setGeoError(data.message || "เกิดข้อผิดพลาด");
           }
@@ -173,7 +193,6 @@ export default function CartDrawer({
     );
   }
 
-  // ─── validate form takeaway ───────────────────────────────
   function handleFormNext() {
     if (!phone.trim()) {
       setFormError(lang === "th" ? "กรุณากรอกเบอร์โทรศัพท์" : "Please enter phone number");
@@ -187,7 +206,6 @@ export default function CartDrawer({
     handleOrder();
   }
 
-  // ─── Styles ───────────────────────────────────────────────
   const fs = baseFontSize || 16;
   const btn = (bg, color, disabled) => ({
     background: disabled ? "var(--bg2)" : bg,
@@ -224,29 +242,16 @@ export default function CartDrawer({
     </div>
   );
 
-  // ─── Render ───────────────────────────────────────────────
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", justifyContent: "flex-end" }}>
-      <div
-        style={{ flex: 1, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }}
-        onClick={onClose}
-      />
-      <div
-        style={{
-          width: 400, maxWidth: "100vw", background: "var(--drawerBg)", height: "100%",
-          overflow: "auto", padding: "24px 20px", display: "flex", flexDirection: "column",
-          borderLeft: "1px solid var(--border)", boxShadow: "-8px 0 48px rgba(0,0,0,0.3)",
-        }}
-      >
+      <div style={{ flex: 1, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }} onClick={onClose} />
+      <div style={{ width: 400, maxWidth: "100vw", background: "var(--drawerBg)", height: "100%", overflow: "auto", padding: "24px 20px", display: "flex", flexDirection: "column", borderLeft: "1px solid var(--border)", boxShadow: "-8px 0 48px rgba(0,0,0,0.3)" }}>
+
         {/* HEADER */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
           <div>
             <h3 style={{ fontSize: fs + 6, fontWeight: 800, margin: 0, color: "var(--text)", fontFamily: "'Mitr', sans-serif" }}>
-              {step === "qr"
-                ? (lang === "th" ? "💳 ชำระเงิน" : "💳 Payment")
-                : step === "form"
-                ? (lang === "th" ? "🛵 สั่งกลับบ้าน" : "🛵 Takeaway")
-                : (lang === "th" ? "🛒 ตะกร้า" : "🛒 Your Cart")}
+              {step === "qr" ? (lang === "th" ? "💳 ชำระเงิน" : "💳 Payment") : step === "form" ? (lang === "th" ? "🛵 สั่งกลับบ้าน" : "🛵 Takeaway") : (lang === "th" ? "🛒 ตะกร้า" : "🛒 Your Cart")}
             </h3>
             {tableNumber ? (
               <div style={{ fontSize: fs - 2, color: "var(--amber)", fontWeight: 600, marginTop: 4, fontFamily: "'Mitr', sans-serif" }}>
@@ -263,7 +268,7 @@ export default function CartDrawer({
           )}
         </div>
 
-        {/* ── SUCCESS ──────────────────────────────────────────── */}
+        {/* SUCCESS */}
         {step === "success" && (
           <div style={{ textAlign: "center", padding: "60px 0", flex: 1 }}>
             <div style={{ fontSize: 64, marginBottom: 16 }}>✅</div>
@@ -271,9 +276,7 @@ export default function CartDrawer({
               {lang === "th" ? "ชำระเงินสำเร็จ!" : "Payment Successful!"}
             </h4>
             <p style={{ color: "var(--text3)", fontSize: fs, fontFamily: "'Sarabun', sans-serif" }}>
-              {isTakeaway
-                ? (lang === "th" ? "เราจะโทรยืนยันนัดรับของค่ะ" : "We'll call to confirm delivery.")
-                : (lang === "th" ? "รอรับอาหารได้เลยค่ะ" : "Your food is being prepared.")}
+              {isTakeaway ? (lang === "th" ? "เราจะโทรยืนยันนัดรับของค่ะ" : "We'll call to confirm delivery.") : (lang === "th" ? "รอรับอาหารได้เลยค่ะ" : "Your food is being prepared.")}
             </p>
             <button onClick={() => { setOrdered(false); onClose(); }} style={{ ...btn("var(--navBg)", "var(--goldBright)", false), marginTop: 28, width: "auto", padding: "14px 36px" }}>
               {lang === "th" ? "ปิด" : "Close"}
@@ -281,7 +284,7 @@ export default function CartDrawer({
           </div>
         )}
 
-        {/* ── FAIL ─────────────────────────────────────────────── */}
+        {/* FAIL */}
         {step === "fail" && (
           <div style={{ textAlign: "center", padding: "60px 0", flex: 1 }}>
             <div style={{ fontSize: 64, marginBottom: 16 }}>❌</div>
@@ -289,45 +292,32 @@ export default function CartDrawer({
               {lang === "th" ? "การชำระเงินไม่สำเร็จ" : "Payment Failed"}
             </h4>
             <p style={{ color: "var(--text3)", fontSize: fs, fontFamily: "'Sarabun', sans-serif", marginBottom: 28 }}>
-              {lang === "th"
-                ? "ยังไม่ได้รับการยืนยันการโอน\nกรุณาลองใหม่หรือติดต่อพนักงาน"
-                : "Payment not confirmed.\nPlease try again or contact staff."}
+              {lang === "th" ? "ยังไม่ได้รับการยืนยันการโอน\nกรุณาลองใหม่หรือติดต่อพนักงาน" : "Payment not confirmed.\nPlease try again or contact staff."}
             </p>
-            <button
-              onClick={() => { setStep("cart"); setQrImageUrl(null); setOrderId(null); setPaymentStatus(null); }}
-              style={{ ...btn("var(--navBg)", "var(--goldBright)", false), width: "auto", padding: "14px 32px" }}
-            >
+            <button onClick={() => { setStep("cart"); setQrImageUrl(null); setOrderId(null); setPaymentStatus(null); }} style={{ ...btn("var(--navBg)", "var(--goldBright)", false), width: "auto", padding: "14px 32px" }}>
               {lang === "th" ? "ลองใหม่" : "Try Again"}
             </button>
           </div>
         )}
 
-        {/* ── QR PAYMENT ───────────────────────────────────────── */}
+        {/* QR PAYMENT */}
         {step === "qr" && (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 20 }}>
-            {/* Stripe badge */}
             <div style={{ background: "linear-gradient(135deg,#635bff,#4f46e5)", borderRadius: 16, padding: "12px 24px", textAlign: "center" }}>
-              <div style={{ color: "#fff", fontFamily: "'Mitr', sans-serif", fontWeight: 800, fontSize: fs + 2 }}>
-                💳 พร้อมเพย์ · Stripe
-              </div>
-              <div style={{ color: "rgba(255,255,255,0.8)", fontSize: fs - 2, fontFamily: "'Sarabun', sans-serif", marginTop: 4 }}>
-                PromptPay via Stripe
-              </div>
+              <div style={{ color: "#fff", fontFamily: "'Mitr', sans-serif", fontWeight: 800, fontSize: fs + 2 }}>💳 พร้อมเพย์ · Stripe</div>
+              <div style={{ color: "rgba(255,255,255,0.8)", fontSize: fs - 2, fontFamily: "'Sarabun', sans-serif", marginTop: 4 }}>PromptPay via Stripe</div>
             </div>
 
-            {/* QR Image จาก Stripe */}
             <div style={{ background: "#fff", borderRadius: 20, padding: 16, boxShadow: "0 8px 32px rgba(0,0,0,0.15)" }}>
               {qrImageUrl ? (
                 <QRImage src={qrImageUrl} size={220} />
               ) : (
-                // fallback ถ้า Stripe ไม่คืน QR URL
                 <div style={{ width: 220, height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: "#999", fontSize: 14, textAlign: "center", padding: 16 }}>
                   ไม่สามารถโหลด QR<br />กรุณาแจ้งพนักงาน
                 </div>
               )}
             </div>
 
-            {/* ยอดเงิน */}
             <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: fs - 2, color: "var(--text3)", fontFamily: "'Sarabun', sans-serif" }}>
                 {lang === "th" ? "ยอดที่ต้องชำระ" : "Amount to pay"}
@@ -337,7 +327,6 @@ export default function CartDrawer({
               </div>
             </div>
 
-            {/* status */}
             <div style={{ background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 12, padding: "12px 20px", textAlign: "center", fontSize: fs - 2, color: "var(--amber)", fontFamily: "'Sarabun', sans-serif" }}>
               ⏳ {lang === "th" ? "รอการยืนยันการโอนเงิน..." : "Waiting for payment confirmation..."}
               <br />
@@ -354,7 +343,7 @@ export default function CartDrawer({
           </div>
         )}
 
-        {/* ── FORM (Takeaway) ───────────────────────────────────── */}
+        {/* FORM */}
         {step === "form" && (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 20 }}>
             <div style={{ background: "var(--surface)", borderRadius: 14, padding: "14px 16px", border: "1px solid var(--border)" }}>
@@ -363,7 +352,7 @@ export default function CartDrawer({
               </div>
               {cart.map((item) => (
                 <div key={item.id} style={{ display: "flex", justifyContent: "space-between", fontSize: fs - 2, color: "var(--text)", fontFamily: "'Sarabun', sans-serif", marginBottom: 4 }}>
-                  <span>{lang === "th" ? item.name : item.nameEn} ×{item.qty}</span>
+                  <span>{lang === "th" ? item.name : item.nameEn} x{item.qty}</span>
                   <span style={{ color: "var(--amber)", fontWeight: 700 }}>฿{item.price * item.qty}</span>
                 </div>
               ))}
@@ -395,15 +384,13 @@ export default function CartDrawer({
             <div style={{ display: "flex", gap: 10, marginTop: "auto" }}>
               <button onClick={() => { setStep("cart"); setFormError(""); setGeoError(null); }} style={{ ...btn("var(--bg2)", "var(--text2)", false), width: "auto", padding: "14px 20px", fontSize: fs, flex: "0 0 auto" }}>←</button>
               <button onClick={handleFormNext} disabled={checking} style={btn("var(--navBg)", "var(--goldBright)", checking)}>
-                {checking
-                  ? (lang === "th" ? "⏳ กำลังตรวจสอบ..." : "⏳ Checking...")
-                  : (lang === "th" ? `ยืนยัน ฿${total}` : `Confirm ฿${total}`) + " →"}
+                {checking ? (lang === "th" ? "⏳ กำลังตรวจสอบ..." : "⏳ Checking...") : (lang === "th" ? `ยืนยัน ฿${total}` : `Confirm ฿${total}`) + " →"}
               </button>
             </div>
           </div>
         )}
 
-        {/* ── CART ─────────────────────────────────────────────── */}
+        {/* CART */}
         {step === "cart" && (
           <>
             {cart.length === 0 ? (
@@ -428,11 +415,11 @@ export default function CartDrawer({
                           {lang === "th" ? item.name : item.nameEn}
                         </div>
                         <div style={{ fontSize: fs - 2, color: "var(--amber)", fontWeight: 700, fontFamily: "'Mitr', sans-serif" }}>
-                          ฿{item.price} × {item.qty} = ฿{item.price * item.qty}
+                          ฿{item.price} x {item.qty} = ฿{item.price * item.qty}
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <button onClick={() => removeFromCart(item.id)} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 8, width: 30, height: 30, cursor: "pointer", fontWeight: 800, fontSize: 18, color: "var(--text2)", display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+                        <button onClick={() => removeFromCart(item.id)} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 8, width: 30, height: 30, cursor: "pointer", fontWeight: 800, fontSize: 18, color: "var(--text2)", display: "flex", alignItems: "center", justifyContent: "center" }}>-</button>
                         <span style={{ fontWeight: 800, minWidth: 24, textAlign: "center", fontSize: fs, color: "var(--text)", fontFamily: "'Mitr', sans-serif" }}>{item.qty}</span>
                         <button onClick={() => addToCart(item)} style={{ background: "var(--navBg)", color: "var(--goldBright)", border: "none", borderRadius: 8, width: 30, height: 30, cursor: "pointer", fontWeight: 800, fontSize: 18, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
                       </div>
@@ -458,9 +445,7 @@ export default function CartDrawer({
                     </button>
                   ) : (
                     <button onClick={handleOrder} disabled={checking} style={btn("var(--navBg)", "var(--goldBright)", checking)}>
-                      {checking
-                        ? (lang === "th" ? "⏳ กำลังตรวจสอบตำแหน่ง..." : "⏳ Checking location...")
-                        : (lang === "th" ? `สั่งอาหาร ฿${total}` : `Place Order ฿${total}`) + " →"}
+                      {checking ? (lang === "th" ? "⏳ กำลังตรวจสอบตำแหน่ง..." : "⏳ Checking location...") : (lang === "th" ? `สั่งอาหาร ฿${total}` : `Place Order ฿${total}`) + " →"}
                     </button>
                   )}
 
