@@ -17,7 +17,7 @@
 
 const SHOP_LAT = 13.355270;
 const SHOP_LNG = 100.985970;
-const RADIUS_KM = 10; // 1 กิโลเมตร
+const RADIUS_KM = 0.1; // 100 เมตร
 
 // ─── Haversine ──────────────────────────────────────────────
 function getDistance(lat1, lng1, lat2, lng2) {
@@ -98,6 +98,8 @@ async function createStripePaymentIntent(secretKey, { orderId, total }) {
       "metadata[orderId]": orderId,
       confirm: "true",
       "payment_method_data[type]": "promptpay",
+      // Stripe PromptPay บังคับต้องมี billing_details[email]
+      "payment_method_data[billing_details][email]": "guest@order.local",
     }),
   });
 
