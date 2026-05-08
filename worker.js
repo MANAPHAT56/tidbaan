@@ -1,5 +1,5 @@
 // ============================================================
-//  📦 Cloudflare Worker — Geofence + Stripe PromptPay + LINE
+//  📦 Cloudflare Worker — Geofence + Turnstile + Stripe PromptPay + LINE
 // ============================================================
 
 const SHOP_LAT = 13.355270;
@@ -57,6 +57,32 @@ async function updateOrderStatus(kv, orderId, status, extra = {}) {
   return order;
 }
 
+// ── Verify Cloudflare Turnstile token ────────────────────────
+async function verifyTurnstile(token, secretKey, ip) {
+  if (!secretKey) {
+    console.warn("TURNSTILE_SECRET not set — skipping verification");
+    return true;
+  }
+  if (!token) return false;
+
+  const res = await fetch(
+    "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        secret: secretKey,
+        response: token,
+        ...(ip ? { remoteip: ip } : {}),
+      }),
+    }
+  );
+
+  const data = await res.json();
+  console.log("Turnstile verify result:", JSON.stringify(data));
+  return data.success === true;
+}
+
 async function createStripePaymentIntent(secretKey, { orderId, total }) {
   const amountSatang = Math.round(Number(total) * 100);
 
@@ -79,7 +105,9 @@ async function createStripePaymentIntent(secretKey, { orderId, total }) {
 
   if (!piRes.ok) {
     const err = await piRes.json().catch(() => ({}));
-    throw new Error(`Stripe error ${piRes.status}: ${err?.error?.message || "unknown"}`);
+    throw new Error(
+      `Stripe error ${piRes.status}: ${err?.error?.message || "unknown"}`
+    );
   }
 
   const pi = await piRes.json();
@@ -100,9 +128,7 @@ async function cancelStripePaymentIntent(secretKey, paymentIntentId) {
         Authorization: `Bearer ${secretKey}`,
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: new URLSearchParams({
-        cancellation_reason: "abandoned",
-      }),
+      body: new URLSearchParams({ cancellation_reason: "abandoned" }),
     }
   );
   if (!res.ok) {
@@ -118,14 +144,18 @@ async function verifyStripeSignature(secret, rawBody, header) {
   if (!secret) return true;
   if (!header) return false;
 
-  const parts = Object.fromEntries(header.split(",").map((p) => p.split("=")));
+  const parts = Object.fromEntries(
+    header.split(",").map((p) => p.split("="))
+  );
   const timestamp = parts["t"];
-  const signatures = header.split(",").filter((p) => p.startsWith("v1=")).map((p) => p.slice(3));
+  const signatures = header
+    .split(",")
+    .filter((p) => p.startsWith("v1="))
+    .map((p) => p.slice(3));
 
   if (!timestamp || signatures.length === 0) return false;
 
   const signedPayload = `${timestamp}.${rawBody}`;
-
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -133,8 +163,11 @@ async function verifyStripeSignature(secret, rawBody, header) {
     false,
     ["sign"]
   );
-
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signedPayload));
+  const sig = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(signedPayload)
+  );
   const hex = Array.from(new Uint8Array(sig))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
@@ -156,35 +189,108 @@ async function sendLineMessage(token, userId, order) {
     return false;
   }
 
-  const { cart, total, tableNumber, isTakeaway, phone, address, orderId, lat, lng } = order;
+  const {
+    cart,
+    total,
+    tableNumber,
+    isTakeaway,
+    phone,
+    address,
+    orderId,
+    lat,
+    lng,
+  } = order;
 
   const now = new Date();
-  const timeThai = now.toLocaleTimeString("th-TH", { timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit" });
-  const dateThai = now.toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", day: "2-digit", month: "2-digit", year: "numeric" });
+  const timeThai = now.toLocaleTimeString("th-TH", {
+    timeZone: "Asia/Bangkok",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const dateThai = now.toLocaleDateString("th-TH", {
+    timeZone: "Asia/Bangkok",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
 
   const itemRows = cart.map((i) => ({
     type: "box",
     layout: "horizontal",
     spacing: "sm",
     contents: [
-      { type: "text", text: i.name, flex: 4, size: "sm", color: "#333333", wrap: true },
-      { type: "text", text: `x${i.qty}`, flex: 1, size: "sm", color: "#888888", align: "center" },
-      { type: "text", text: `฿${i.price * i.qty}`, flex: 2, size: "sm", color: "#e67e00", weight: "bold", align: "end" },
+      {
+        type: "text",
+        text: i.name,
+        flex: 4,
+        size: "sm",
+        color: "#333333",
+        wrap: true,
+      },
+      {
+        type: "text",
+        text: `x${i.qty}`,
+        flex: 1,
+        size: "sm",
+        color: "#888888",
+        align: "center",
+      },
+      {
+        type: "text",
+        text: `฿${i.price * i.qty}`,
+        flex: 2,
+        size: "sm",
+        color: "#e67e00",
+        weight: "bold",
+        align: "end",
+      },
     ],
   }));
 
   const metaContents = isTakeaway
     ? [
-        { type: "text", text: `📱 ${phone}`, size: "sm", color: "#555555", wrap: true },
+        {
+          type: "text",
+          text: `📱 ${phone}`,
+          size: "sm",
+          color: "#555555",
+          wrap: true,
+        },
         ...(address
-          ? [{ type: "text", text: `🏠 ${address}`, size: "sm", color: "#555555", wrap: true }]
+          ? [
+              {
+                type: "text",
+                text: `🏠 ${address}`,
+                size: "sm",
+                color: "#555555",
+                wrap: true,
+              },
+            ]
           : lat && lng
-          ? [{ type: "text", text: `📍 GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`, size: "xs", color: "#888888", wrap: true }]
+          ? [
+              {
+                type: "text",
+                text: `📍 GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+                size: "xs",
+                color: "#888888",
+                wrap: true,
+              },
+            ]
           : []),
       ]
-    : [{ type: "text", text: `📍 โต๊ะ ${tableNumber}`, size: "sm", color: "#e67e00", weight: "bold" }];
+    : [
+        {
+          type: "text",
+          text: `📍 โต๊ะ ${tableNumber}`,
+          size: "sm",
+          color: "#e67e00",
+          weight: "bold",
+        },
+      ];
 
-  const orderType = isTakeaway ? "🛵 สั่งกลับบ้าน" : `🍽️ ทานที่ร้าน · โต๊ะ ${tableNumber}`;
+  const orderType = isTakeaway
+    ? "🛵 สั่งกลับบ้าน"
+    : `🍽️ ทานที่ร้าน · โต๊ะ ${tableNumber}`;
 
   const message = {
     to: userId,
@@ -205,11 +311,33 @@ async function sendLineMessage(token, userId, order) {
                 type: "box",
                 layout: "horizontal",
                 contents: [
-                  { type: "text", text: "✅ ออร์เดอร์ใหม่!", color: "#FFD700", weight: "bold", size: "lg", flex: 1 },
-                  { type: "text", text: orderType, color: "#FFD700", weight: "bold", size: "sm", align: "end", wrap: true, flex: 2 },
+                  {
+                    type: "text",
+                    text: "✅ ออร์เดอร์ใหม่!",
+                    color: "#FFD700",
+                    weight: "bold",
+                    size: "lg",
+                    flex: 1,
+                  },
+                  {
+                    type: "text",
+                    text: orderType,
+                    color: "#FFD700",
+                    weight: "bold",
+                    size: "sm",
+                    align: "end",
+                    wrap: true,
+                    flex: 2,
+                  },
                 ],
               },
-              { type: "text", text: `${dateThai}  ${timeThai}  #${orderId}`, color: "#aaaaaa", size: "xs", margin: "xs" },
+              {
+                type: "text",
+                text: `${dateThai}  ${timeThai}  #${orderId}`,
+                color: "#aaaaaa",
+                size: "xs",
+                margin: "xs",
+              },
             ],
           },
           body: {
@@ -227,8 +355,23 @@ async function sendLineMessage(token, userId, order) {
                 layout: "horizontal",
                 margin: "md",
                 contents: [
-                  { type: "text", text: "รวมทั้งสิ้น", weight: "bold", size: "md", color: "#333333", flex: 3 },
-                  { type: "text", text: `฿${total}`, weight: "bold", size: "xl", color: "#e67e00", align: "end", flex: 2 },
+                  {
+                    type: "text",
+                    text: "รวมทั้งสิ้น",
+                    weight: "bold",
+                    size: "md",
+                    color: "#333333",
+                    flex: 3,
+                  },
+                  {
+                    type: "text",
+                    text: `฿${total}`,
+                    weight: "bold",
+                    size: "xl",
+                    color: "#e67e00",
+                    align: "end",
+                    flex: 2,
+                  },
                 ],
               },
             ],
@@ -239,7 +382,13 @@ async function sendLineMessage(token, userId, order) {
             paddingAll: "12px",
             backgroundColor: "#f8f8f8",
             contents: [
-              { type: "text", text: "🙏 ขอบคุณที่อุดหนุน ร้านติดบ้าน", color: "#666666", size: "xs", align: "center" },
+              {
+                type: "text",
+                text: "🙏 ขอบคุณที่อุดหนุน ร้านติดบ้าน",
+                color: "#666666",
+                size: "xs",
+                align: "center",
+              },
             ],
           },
         },
@@ -250,7 +399,10 @@ async function sendLineMessage(token, userId, order) {
   try {
     const res = await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(message),
     });
     if (!res.ok) {
@@ -265,6 +417,7 @@ async function sendLineMessage(token, userId, order) {
   }
 }
 
+// ============================================================
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -276,7 +429,8 @@ export default {
     if (request.method === "GET" && path === "/payment-status") {
       const orderId = url.searchParams.get("orderId");
       if (!orderId) return cors({ error: "missing orderId" }, 400);
-      if (!env.ORDERS_KV) return cors({ status: "unknown", error: "KV not configured" }, 500);
+      if (!env.ORDERS_KV)
+        return cors({ status: "unknown", error: "KV not configured" }, 500);
 
       const order = await getOrder(env.ORDERS_KV, orderId);
       if (!order) return cors({ status: "not_found" }, 404);
@@ -287,8 +441,11 @@ export default {
     // ── POST /cancel-order ───────────────────────────────────
     if (request.method === "POST" && path === "/cancel-order") {
       let body;
-      try { body = await request.json(); }
-      catch { return cors({ error: "invalid json" }, 400); }
+      try {
+        body = await request.json();
+      } catch {
+        return cors({ error: "invalid json" }, 400);
+      }
 
       const { orderId, paymentIntentId } = body;
       if (!orderId || !paymentIntentId) {
@@ -296,20 +453,19 @@ export default {
       }
       if (!env.ORDERS_KV) return cors({ error: "KV not configured" }, 500);
 
-      // ตรวจสอบว่า order ยังเป็น pending อยู่ — ป้องกัน cancel ซ้ำ
       const order = await getOrder(env.ORDERS_KV, orderId);
       if (!order) return cors({ error: "order not found" }, 404);
       if (order.status !== "pending") {
-        console.log(`cancel-order: skip — status is already "${order.status}"`);
+        console.log(
+          `cancel-order: skip — status is already "${order.status}"`
+        );
         return cors({ ok: true, skipped: true, status: order.status });
       }
 
-      // cancel Stripe PI
       if (env.STRIPE_SECRET_KEY) {
         await cancelStripePaymentIntent(env.STRIPE_SECRET_KEY, paymentIntentId);
       }
 
-      // update KV → expired
       await updateOrderStatus(env.ORDERS_KV, orderId, "expired");
       console.log("order expired:", orderId);
 
@@ -322,12 +478,19 @@ export default {
       const stripeSig = request.headers.get("stripe-signature");
 
       let event;
-      try { event = JSON.parse(rawBody); }
-      catch { return cors({ error: "invalid json" }, 400); }
+      try {
+        event = JSON.parse(rawBody);
+      } catch {
+        return cors({ error: "invalid json" }, 400);
+      }
 
       console.log("webhook event type:", event.type);
 
-      const valid = await verifyStripeSignature(env.STRIPE_WEBHOOK_SECRET, rawBody, stripeSig);
+      const valid = await verifyStripeSignature(
+        env.STRIPE_WEBHOOK_SECRET,
+        rawBody,
+        stripeSig
+      );
       console.log("signature valid:", valid);
       if (!valid) {
         console.error("Stripe signature mismatch");
@@ -354,9 +517,8 @@ export default {
         event.type === "payment_intent.payment_failed" ||
         event.type === "payment_intent.canceled"
       ) {
-        // canceled อาจมาจาก /cancel-order ที่เราเรียกเอง → map เป็น expired ถ้า KV บอกอยู่แล้ว
         const existing = await getOrder(env.ORDERS_KV, orderId);
-        status = (existing?.status === "expired") ? "expired" : "fail";
+        status = existing?.status === "expired" ? "expired" : "fail";
       } else {
         return cors({ ok: true, ignored: true, type: event.type });
       }
@@ -372,7 +534,11 @@ export default {
 
       if (status === "success") {
         console.log("sending LINE + Sheet...");
-        await sendLineMessage(env.LINE_MESSAGING_TOKEN, env.LINE_USER_ID, updated);
+        await sendLineMessage(
+          env.LINE_MESSAGING_TOKEN,
+          env.LINE_USER_ID,
+          updated
+        );
         if (env.GOOGLE_SHEET_URL) {
           await sendToGoogleSheet(env.GOOGLE_SHEET_URL, { ...updated, status });
         }
@@ -382,34 +548,102 @@ export default {
     }
 
     // ── POST /create-order ───────────────────────────────────
-    if (request.method === "POST" && (path === "/create-order" || path === "/")) {
+    if (
+      request.method === "POST" &&
+      (path === "/create-order" || path === "/")
+    ) {
       let body;
-      try { body = await request.json(); }
-      catch { return cors({ message: "ข้อมูล JSON ไม่ถูกต้อง" }, 400); }
+      try {
+        body = await request.json();
+      } catch {
+        return cors({ message: "ข้อมูล JSON ไม่ถูกต้อง" }, 400);
+      }
 
-      const { lat, lng, cart, total, tableNumber, isTakeaway, phone, address } = body;
+      const {
+        lat,
+        lng,
+        cart,
+        total,
+        tableNumber,
+        isTakeaway,
+        phone,
+        address,
+        turnstileToken,  // ← รับ token จาก frontend
+      } = body;
 
+      // ── 1. Validate required fields ──────────────────────
       if (!lat || !lng || !cart?.length) {
-        return cors({ message: "กรุณาส่งข้อมูลให้ครบ: lat, lng, cart" }, 400);
+        return cors(
+          { message: "กรุณาส่งข้อมูลให้ครบ: lat, lng, cart" },
+          400
+        );
       }
 
       if (isTakeaway && !phone) {
-        return cors({ message: "กรุณาระบุเบอร์โทรศัพท์", ok: false }, 400);
+        return cors(
+          { message: "กรุณาระบุเบอร์โทรศัพท์", ok: false },
+          400
+        );
       }
 
-      const dist = getDistance(lat, lng, SHOP_LAT, SHOP_LNG);
-      console.log(`ระยะทาง: ${(dist * 1000).toFixed(0)} ม. | โต๊ะ: ${tableNumber || "takeaway"}`);
-
-      if (dist > RADIUS_KM) {
+      // ── 2. Verify Turnstile ───────────────────────────────
+      if (!turnstileToken) {
         return cors(
-          { ok: false, message: `📍 คุณอยู่ห่างจากร้าน ${Math.round(dist * 1000)} เมตร\nกรุณาสั่งอาหารที่ร้านเท่านั้น 🙏` },
+          {
+            ok: false,
+            message: "กรุณายืนยันตัวตนก่อนสั่งอาหาร (Turnstile token missing)",
+          },
+          400
+        );
+      }
+
+      const clientIp =
+        request.headers.get("CF-Connecting-IP") ||
+        request.headers.get("X-Forwarded-For") ||
+        "";
+
+      const turnstileOk = await verifyTurnstile(
+        turnstileToken,
+        env.TURNSTILE_SECRET,
+        clientIp
+      );
+
+      if (!turnstileOk) {
+        console.error("Turnstile verification failed for IP:", clientIp);
+        return cors(
+          {
+            ok: false,
+            message: "การยืนยันตัวตนล้มเหลว กรุณาลองใหม่อีกครั้ง",
+          },
           403
         );
       }
 
+      console.log("Turnstile passed ✓ IP:", clientIp);
+
+      // ── 3. Geofence check ────────────────────────────────
+      const dist = getDistance(lat, lng, SHOP_LAT, SHOP_LNG);
+      console.log(
+        `ระยะทาง: ${(dist * 1000).toFixed(0)} ม. | โต๊ะ: ${tableNumber || "takeaway"}`
+      );
+
+      if (dist > RADIUS_KM) {
+        return cors(
+          {
+            ok: false,
+            message: `📍 คุณอยู่ห่างจากร้าน ${Math.round(dist * 1000)} เมตร\nกรุณาสั่งอาหารที่ร้านเท่านั้น 🙏`,
+          },
+          403
+        );
+      }
+
+      // ── 4. Create Stripe PaymentIntent ───────────────────
       if (!env.STRIPE_SECRET_KEY) {
         console.error("Missing STRIPE_SECRET_KEY");
-        return cors({ ok: false, message: "ระบบชำระเงินยังไม่พร้อม กรุณาแจ้งพนักงาน" }, 500);
+        return cors(
+          { ok: false, message: "ระบบชำระเงินยังไม่พร้อม กรุณาแจ้งพนักงาน" },
+          500
+        );
       }
 
       const orderId = genOrderId();
@@ -417,14 +651,21 @@ export default {
 
       let stripeResult;
       try {
-        stripeResult = await createStripePaymentIntent(env.STRIPE_SECRET_KEY, { orderId, total });
+        stripeResult = await createStripePaymentIntent(env.STRIPE_SECRET_KEY, {
+          orderId,
+          total,
+        });
       } catch (e) {
         console.error("Stripe PaymentIntent error:", e.message);
-        return cors({ ok: false, message: "สร้างคำสั่งชำระเงินไม่สำเร็จ กรุณาลองใหม่" }, 502);
+        return cors(
+          { ok: false, message: "สร้างคำสั่งชำระเงินไม่สำเร็จ กรุณาลองใหม่" },
+          502
+        );
       }
 
       const { paymentIntentId, qrImageUrl } = stripeResult;
 
+      // ── 5. Save to KV ────────────────────────────────────
       if (env.ORDERS_KV) {
         await saveOrder(env.ORDERS_KV, orderId, {
           orderId,
