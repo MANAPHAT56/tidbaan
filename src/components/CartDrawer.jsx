@@ -35,12 +35,14 @@ export default function CartDrawer({
   const [formError, setFormError] = useState("");
   const [qrImageUrl, setQrImageUrl] = useState(null);
   const [orderId, setOrderId] = useState(null);
+  const [paymentIntentId, setPaymentIntentId] = useState(null);
   const [paymentStatus, setPaymentStatus] = useState(null);
+  // "expired" | "failed" | null — ใช้แสดง message ต่างกันใน step fail
+  const [failReason, setFailReason] = useState(null);
 
-  // ── pollingRef เก็บ interval ID ปัจจุบัน
   const pollingRef = useRef(null);
-  // ── activeOrderRef เก็บ orderId ที่ "active" จริงๆ ป้องกัน stale closure
   const activeOrderRef = useRef(null);
+  const expireTimerRef = useRef(null);
 
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -56,15 +58,27 @@ export default function CartDrawer({
 
   const isTakeaway = !tableNumber;
 
-  // cleanup เมื่อ component unmount
+  // ── warn before unload เมื่ออยู่หน้า QR ──────────────────
+  useEffect(() => {
+    if (step !== "qr") return;
+    const handler = (e) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [step]);
+
+  // ── cleanup เมื่อ unmount ─────────────────────────────────
   useEffect(() => {
     return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
+      stopPolling();
+      clearExpireTimer();
       activeOrderRef.current = null;
     };
   }, []);
 
-  // reset เมื่อ ordered กลับเป็น false (ปิด drawer)
+  // ── reset เมื่อ ordered กลับเป็น false (ปิด drawer) ──────
   useEffect(() => {
     if (!ordered) {
       setStep("cart");
@@ -74,9 +88,11 @@ export default function CartDrawer({
       setFormError("");
       setQrImageUrl(null);
       setOrderId(null);
+      setPaymentIntentId(null);
       setPaymentStatus(null);
-      if (pollingRef.current) clearInterval(pollingRef.current);
-      pollingRef.current = null;
+      setFailReason(null);
+      stopPolling();
+      clearExpireTimer();
       activeOrderRef.current = null;
     }
   }, [ordered]);
@@ -86,15 +102,42 @@ export default function CartDrawer({
     pollingRef.current = null;
   }
 
-  function startPolling(oid) {
-    // หยุด interval เก่าทุกตัวก่อนเสมอ
-    stopPolling();
+  function clearExpireTimer() {
+    if (expireTimerRef.current) clearTimeout(expireTimerRef.current);
+    expireTimerRef.current = null;
+  }
 
-    // บันทึก orderId ที่กำลัง active
+  // ── cancel order ที่ worker + update UI ──────────────────
+  async function handleExpire(oid, piId) {
+    // guard: ถ้า order นี้ไม่ใช่ตัว active แล้ว ไม่ทำอะไร
+    if (activeOrderRef.current !== oid) return;
+
+    stopPolling();
+    activeOrderRef.current = null;
+
+    // เรียก worker ให้ cancel Stripe PI + set KV → expired
+    try {
+      await fetch(`${WORKER_URL}/cancel-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: oid, paymentIntentId: piId }),
+      });
+    } catch (e) {
+      console.error("cancel-order fetch error:", e);
+    }
+
+    setPaymentStatus("expired");
+    setFailReason("expired");
+    setStep("fail");
+  }
+
+  function startPolling(oid, piId) {
+    stopPolling();
+    clearExpireTimer();
     activeOrderRef.current = oid;
 
+    // ── polling ทุก 3 วิ ──────────────────────────────────
     pollingRef.current = setInterval(async () => {
-      // ถ้า orderId เปลี่ยนไปแล้ว (เกิด order ใหม่) → หยุดตัวเองทันที
       if (activeOrderRef.current !== oid) {
         clearInterval(pollingRef.current);
         return;
@@ -102,28 +145,34 @@ export default function CartDrawer({
       try {
         const res = await fetch(`${WORKER_URL}/payment-status?orderId=${oid}`);
         const data = await res.json();
-        // double-check หลัง await เพราะ await ใช้เวลา
         if (activeOrderRef.current !== oid) return;
 
         if (data.status === "success") {
           stopPolling();
+          clearExpireTimer();
           setPaymentStatus("success");
           setStep("success");
           setOrdered(true);
-        } else if (data.status === "fail" || data.status === "expired") {
+        } else if (data.status === "fail") {
           stopPolling();
+          clearExpireTimer();
           setPaymentStatus("fail");
+          setFailReason("failed");
+          setStep("fail");
+        } else if (data.status === "expired") {
+          // worker บอกว่า expired แล้ว (อาจมาจาก webhook canceled)
+          stopPolling();
+          clearExpireTimer();
+          setPaymentStatus("expired");
+          setFailReason("expired");
           setStep("fail");
         }
       } catch (_) {}
     }, 3000);
 
-    // หยุด polling หลัง 10 นาที
-    setTimeout(() => {
-      if (activeOrderRef.current !== oid) return;
-      stopPolling();
-      setPaymentStatus((prev) => (prev === null ? "fail" : prev));
-      setStep((prev) => (prev === "qr" ? "fail" : prev));
+    // ── หมดอายุใน 10 นาที → cancel ────────────────────────
+    expireTimerRef.current = setTimeout(() => {
+      handleExpire(oid, piId);
     }, 10 * 60 * 1000);
   }
 
@@ -168,8 +217,9 @@ export default function CartDrawer({
           if (res.ok && data.ok) {
             setQrImageUrl(data.qrImageUrl);
             setOrderId(data.orderId);
+            setPaymentIntentId(data.paymentIntentId);
             setStep("qr");
-            startPolling(data.orderId); // ส่ง orderId ใหม่เข้าไปตรงๆ ไม่ผ่าน state
+            startPolling(data.orderId, data.paymentIntentId);
           } else {
             setGeoError(data.message || "เกิดข้อผิดพลาด");
           }
@@ -242,6 +292,21 @@ export default function CartDrawer({
     </div>
   );
 
+  // ── fail message ตาม reason ───────────────────────────────
+  const failTitle = failReason === "expired"
+    ? (lang === "th" ? "QR หมดอายุแล้ว" : "QR Code Expired")
+    : (lang === "th" ? "การชำระเงินไม่สำเร็จ" : "Payment Failed");
+
+  const failBody = failReason === "expired"
+    ? (lang === "th"
+        ? "QR Code หมดอายุหลัง 10 นาที\nกรุณาสั่งใหม่อีกครั้ง"
+        : "QR Code expired after 10 minutes.\nPlease place a new order.")
+    : (lang === "th"
+        ? "ยังไม่ได้รับการยืนยันการโอน\nกรุณาลองใหม่หรือติดต่อพนักงาน"
+        : "Payment not confirmed.\nPlease try again or contact staff.");
+
+  const failIcon = failReason === "expired" ? "⏰" : "❌";
+
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", justifyContent: "flex-end" }}>
       <div style={{ flex: 1, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)" }} onClick={onClose} />
@@ -284,18 +349,28 @@ export default function CartDrawer({
           </div>
         )}
 
-        {/* FAIL */}
+        {/* FAIL / EXPIRED */}
         {step === "fail" && (
           <div style={{ textAlign: "center", padding: "60px 0", flex: 1 }}>
-            <div style={{ fontSize: 64, marginBottom: 16 }}>❌</div>
-            <h4 style={{ fontWeight: 800, fontSize: fs + 6, color: "#ef4444", fontFamily: "'Mitr', sans-serif", marginBottom: 8 }}>
-              {lang === "th" ? "การชำระเงินไม่สำเร็จ" : "Payment Failed"}
+            <div style={{ fontSize: 64, marginBottom: 16 }}>{failIcon}</div>
+            <h4 style={{ fontWeight: 800, fontSize: fs + 6, color: failReason === "expired" ? "var(--amber)" : "#ef4444", fontFamily: "'Mitr', sans-serif", marginBottom: 8 }}>
+              {failTitle}
             </h4>
-            <p style={{ color: "var(--text3)", fontSize: fs, fontFamily: "'Sarabun', sans-serif", marginBottom: 28 }}>
-              {lang === "th" ? "ยังไม่ได้รับการยืนยันการโอน\nกรุณาลองใหม่หรือติดต่อพนักงาน" : "Payment not confirmed.\nPlease try again or contact staff."}
+            <p style={{ color: "var(--text3)", fontSize: fs, fontFamily: "'Sarabun', sans-serif", marginBottom: 28, whiteSpace: "pre-line" }}>
+              {failBody}
             </p>
-            <button onClick={() => { setStep("cart"); setQrImageUrl(null); setOrderId(null); setPaymentStatus(null); }} style={{ ...btn("var(--navBg)", "var(--goldBright)", false), width: "auto", padding: "14px 32px" }}>
-              {lang === "th" ? "ลองใหม่" : "Try Again"}
+            <button
+              onClick={() => {
+                setStep("cart");
+                setQrImageUrl(null);
+                setOrderId(null);
+                setPaymentIntentId(null);
+                setPaymentStatus(null);
+                setFailReason(null);
+              }}
+              style={{ ...btn("var(--navBg)", "var(--goldBright)", false), width: "auto", padding: "14px 32px" }}
+            >
+              {lang === "th" ? "สั่งใหม่" : "New Order"}
             </button>
           </div>
         )}
@@ -323,8 +398,18 @@ export default function CartDrawer({
                 {lang === "th" ? "ยอดที่ต้องชำระ" : "Amount to pay"}
               </div>
               <div style={{ fontSize: fs + 18, fontWeight: 900, color: "var(--amber)", fontFamily: "'Mitr', sans-serif", lineHeight: 1.1 }}>
-                ฿{total}
+                ฿{Number(total).toLocaleString()}
               </div>
+              <div style={{ marginTop: 10, fontSize: fs - 2, color: "var(--text2)", fontFamily: "'Sarabun', sans-serif", background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.18)", padding: "8px 14px", borderRadius: 999, display: "inline-block", fontWeight: 600 }}>
+                🍳 {lang === "th" ? "อาหารใช้เวลาประมาณ 8–15 นาที" : "Estimated prep time: 8–15 min"}
+              </div>
+            </div>
+
+            {/* ⚠️ อย่ารีเฟรช */}
+            <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 12, padding: "10px 16px", textAlign: "center", fontSize: fs - 3, color: "#ef4444", fontFamily: "'Sarabun', sans-serif", fontWeight: 600, lineHeight: 1.6 }}>
+              ⚠️ {lang === "th"
+                ? "กรุณาอย่ารีเฟรชหรือปิดหน้าเว็บ จนกว่าการชำระเงินจะสำเร็จ"
+                : "Do not refresh or close this page until payment is confirmed"}
             </div>
 
             <div style={{ background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 12, padding: "12px 20px", textAlign: "center", fontSize: fs - 2, color: "var(--amber)", fontFamily: "'Sarabun', sans-serif" }}>
@@ -358,7 +443,7 @@ export default function CartDrawer({
               ))}
               <div style={{ borderTop: "1px dashed var(--divider)", marginTop: 8, paddingTop: 8, display: "flex", justifyContent: "space-between", fontWeight: 900, fontSize: fs, color: "var(--amber)", fontFamily: "'Mitr', sans-serif" }}>
                 <span>{lang === "th" ? "รวม" : "Total"}</span>
-                <span>฿{total}</span>
+                <span>฿{Number(total).toLocaleString()}</span>
               </div>
             </div>
 
@@ -368,8 +453,8 @@ export default function CartDrawer({
             </div>
 
             <div>
-              {label(lang === "th" ? "🏠 ที่อยู่จัดส่ง (ไม่บังคับ)" : "🏠 Delivery Address (optional)")}
-              <textarea placeholder={lang === "th" ? "บ้านเลขที่ ถนน ตำบล อำเภอ..." : "House no., street..."} value={address} onChange={(e) => setAddress(e.target.value)} rows={3} style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6 }} />
+              {label(lang === "th" ? "🏠 ที่อยู่จัดส่ง เช่น ตึกอะไร (ไม่บังคับ)" : "🏠 Delivery Address (optional)")}
+              <textarea placeholder={lang === "th" ? "ตึก A2..." : "House no., street..."} value={address} onChange={(e) => setAddress(e.target.value)} rows={3} style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6 }} />
               <div style={{ fontSize: fs - 4, color: "var(--text3)", fontFamily: "'Sarabun', sans-serif", marginTop: 6 }}>
                 📍 {lang === "th" ? "หากไม่กรอก ระบบจะใช้ตำแหน่ง GPS ของคุณ" : "If blank, GPS location will be used"}
               </div>
@@ -384,7 +469,7 @@ export default function CartDrawer({
             <div style={{ display: "flex", gap: 10, marginTop: "auto" }}>
               <button onClick={() => { setStep("cart"); setFormError(""); setGeoError(null); }} style={{ ...btn("var(--bg2)", "var(--text2)", false), width: "auto", padding: "14px 20px", fontSize: fs, flex: "0 0 auto" }}>←</button>
               <button onClick={handleFormNext} disabled={checking} style={btn("var(--navBg)", "var(--goldBright)", checking)}>
-                {checking ? (lang === "th" ? "⏳ กำลังตรวจสอบ..." : "⏳ Checking...") : (lang === "th" ? `ยืนยัน ฿${total}` : `Confirm ฿${total}`) + " →"}
+                {checking ? (lang === "th" ? "⏳ กำลังตรวจสอบ..." : "⏳ Checking...") : (lang === "th" ? `ยืนยัน ฿${Number(total).toLocaleString()}` : `Confirm ฿${Number(total).toLocaleString()}`) + " →"}
               </button>
             </div>
           </div>
@@ -430,7 +515,7 @@ export default function CartDrawer({
                 <div style={{ borderTop: "2px dashed var(--divider)", paddingTop: 20, marginTop: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
                     <span style={{ fontWeight: 700, fontSize: fs + 2, color: "var(--text)", fontFamily: "'Mitr', sans-serif" }}>{lang === "th" ? "รวมทั้งหมด" : "Total"}</span>
-                    <span style={{ fontWeight: 900, fontSize: fs + 6, color: "var(--amber)", fontFamily: "'Mitr', sans-serif" }}>฿{total}</span>
+                    <span style={{ fontWeight: 900, fontSize: fs + 6, color: "var(--amber)", fontFamily: "'Mitr', sans-serif" }}>฿{Number(total).toLocaleString()}</span>
                   </div>
 
                   {geoError && (
@@ -445,7 +530,7 @@ export default function CartDrawer({
                     </button>
                   ) : (
                     <button onClick={handleOrder} disabled={checking} style={btn("var(--navBg)", "var(--goldBright)", checking)}>
-                      {checking ? (lang === "th" ? "⏳ กำลังตรวจสอบตำแหน่ง..." : "⏳ Checking location...") : (lang === "th" ? `สั่งอาหาร ฿${total}` : `Place Order ฿${total}`) + " →"}
+                      {checking ? (lang === "th" ? "⏳ กำลังตรวจสอบตำแหน่ง..." : "⏳ Checking location...") : (lang === "th" ? `สั่งอาหาร ฿${Number(total).toLocaleString()}` : `Place Order ฿${Number(total).toLocaleString()}`) + " →"}
                     </button>
                   )}
 

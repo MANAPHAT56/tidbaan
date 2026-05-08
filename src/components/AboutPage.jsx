@@ -81,7 +81,7 @@ export default function AboutPage() {
             fontFamily: "'Mitr', sans-serif",
           }}
         >
-          {lang === "th" ? "เกี่ยวกับร้านติดบ้าน" : "About Tidbaan"}
+          {lang === "th" ? "เกี่ยวกับร้านไก่ติดบ้าน" : "About Tidbaan"}
         </h2>
         <div style={{ width: 48, height: 3, background: "var(--goldBright)", borderRadius: 4, margin: "0 auto 14px" }} />
         <p

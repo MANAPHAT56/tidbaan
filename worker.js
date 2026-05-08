@@ -91,6 +91,29 @@ async function createStripePaymentIntent(secretKey, { orderId, total }) {
   return { paymentIntentId: pi.id, clientSecret: pi.client_secret, qrImageUrl };
 }
 
+async function cancelStripePaymentIntent(secretKey, paymentIntentId) {
+  const res = await fetch(
+    `https://api.stripe.com/v1/payment_intents/${paymentIntentId}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        cancellation_reason: "abandoned",
+      }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    console.error("Stripe cancel error:", err?.error?.message);
+    return false;
+  }
+  console.log("Stripe PI cancelled:", paymentIntentId);
+  return true;
+}
+
 async function verifyStripeSignature(secret, rawBody, header) {
   if (!secret) return true;
   if (!header) return false;
@@ -261,12 +284,43 @@ export default {
       return cors({ status: order.status, orderId, updatedAt: order.updatedAt });
     }
 
+    // ── POST /cancel-order ───────────────────────────────────
+    if (request.method === "POST" && path === "/cancel-order") {
+      let body;
+      try { body = await request.json(); }
+      catch { return cors({ error: "invalid json" }, 400); }
+
+      const { orderId, paymentIntentId } = body;
+      if (!orderId || !paymentIntentId) {
+        return cors({ error: "missing orderId or paymentIntentId" }, 400);
+      }
+      if (!env.ORDERS_KV) return cors({ error: "KV not configured" }, 500);
+
+      // ตรวจสอบว่า order ยังเป็น pending อยู่ — ป้องกัน cancel ซ้ำ
+      const order = await getOrder(env.ORDERS_KV, orderId);
+      if (!order) return cors({ error: "order not found" }, 404);
+      if (order.status !== "pending") {
+        console.log(`cancel-order: skip — status is already "${order.status}"`);
+        return cors({ ok: true, skipped: true, status: order.status });
+      }
+
+      // cancel Stripe PI
+      if (env.STRIPE_SECRET_KEY) {
+        await cancelStripePaymentIntent(env.STRIPE_SECRET_KEY, paymentIntentId);
+      }
+
+      // update KV → expired
+      await updateOrderStatus(env.ORDERS_KV, orderId, "expired");
+      console.log("order expired:", orderId);
+
+      return cors({ ok: true, orderId, status: "expired" });
+    }
+
     // ── POST /payment-webhook ────────────────────────────────
     if (request.method === "POST" && path === "/payment-webhook") {
       const rawBody = await request.text();
       const stripeSig = request.headers.get("stripe-signature");
 
-      // parse ก่อน verify เพื่อ log type
       let event;
       try { event = JSON.parse(rawBody); }
       catch { return cors({ error: "invalid json" }, 400); }
@@ -283,7 +337,6 @@ export default {
       const pi = event?.data?.object;
       const orderId = pi?.metadata?.orderId;
 
-      // *** log สำคัญ: ดูว่า metadata มี orderId จริงมั้ย ***
       console.log("pi.id:", pi?.id);
       console.log("orderId from metadata:", orderId);
 
@@ -301,27 +354,27 @@ export default {
         event.type === "payment_intent.payment_failed" ||
         event.type === "payment_intent.canceled"
       ) {
-        status = "fail";
+        // canceled อาจมาจาก /cancel-order ที่เราเรียกเอง → map เป็น expired ถ้า KV บอกอยู่แล้ว
+        const existing = await getOrder(env.ORDERS_KV, orderId);
+        status = (existing?.status === "expired") ? "expired" : "fail";
       } else {
         return cors({ ok: true, ignored: true, type: event.type });
       }
 
       console.log("updating KV orderId:", orderId, "→ status:", status);
-      const order = await updateOrderStatus(env.ORDERS_KV, orderId, status, {
+      const updated = await updateOrderStatus(env.ORDERS_KV, orderId, status, {
         paymentIntentId: pi.id,
         stripeStatus: pi.status,
       });
 
-      // *** log ดูว่า KV หา order เจอมั้ย ***
-      console.log("order from KV:", order ? "found" : "NOT FOUND");
-
-      if (!order) return cors({ error: "order not found in KV" }, 404);
+      console.log("order from KV:", updated ? "found" : "NOT FOUND");
+      if (!updated) return cors({ error: "order not found in KV" }, 404);
 
       if (status === "success") {
         console.log("sending LINE + Sheet...");
-        await sendLineMessage(env.LINE_MESSAGING_TOKEN, env.LINE_USER_ID, order);
+        await sendLineMessage(env.LINE_MESSAGING_TOKEN, env.LINE_USER_ID, updated);
         if (env.GOOGLE_SHEET_URL) {
-          await sendToGoogleSheet(env.GOOGLE_SHEET_URL, { ...order, status });
+          await sendToGoogleSheet(env.GOOGLE_SHEET_URL, { ...updated, status });
         }
       }
 

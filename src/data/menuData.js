@@ -127,7 +127,7 @@ export const siteInfo = {
   name: { th: "ติดบ้าน", en: "Tidbaan" },
   tagline: { th: "อาหารตามสั่ง · ข้าวแกง · ขนมจีน", en: "Thai Home-Style · Rice Dishes · Noodles" },
   story: {
-    th: "ร้านติดบ้านเปิดมาแล้วกว่า 2 ปี ด้วยสูตรอาหารที่ถ่ายทอดจากรุ่นสู่รุ่น ทำด้วยใจรักและวัตถุดิบสดใหม่ทุกวัน เราเน้นรสชาติที่คุ้นเคยเหมือนอาหารบ้าน ราคาไม่แพง แต่อร่อยจนต้องกลับมาซ้ำ",
+    th: "ร้านไก่ติดบ้านเปิดมาแล้วกว่า 2 ปี ด้วยสูตรอาหารที่ถ่ายทอดจากรุ่นสู่รุ่น ทำด้วยใจรักและวัตถุดิบสดใหม่ทุกวัน เราเน้นรสชาติที่คุ้นเคยเหมือนอาหารบ้าน ราคาไม่แพง แต่อร่อยจนต้องกลับมาซ้ำ",
     en: "Tidbaan has been open for over 2 years, with recipes passed down through generations. Made with love and fresh ingredients every day. We focus on familiar home-style flavors at affordable prices — so good you'll always come back.",
   },
   hours: { th: "จ–ส 16:30–21:30 น.", en: "Mon–Sat 16:30–21:30" },
