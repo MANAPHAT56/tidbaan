@@ -408,7 +408,7 @@ export default function CartDrawer({
             {/* ⚠️ อย่ารีเฟรช */}
             <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 12, padding: "10px 16px", textAlign: "center", fontSize: fs - 3, color: "#ef4444", fontFamily: "'Sarabun', sans-serif", fontWeight: 600, lineHeight: 1.6 }}>
               ⚠️ {lang === "th"
-                ? "กรุณาอย่ารีเฟรชหรือปิดหน้าเว็บ จนกว่าการชำระเงินจะสำเร็จ"
+                ? "กรุณาอย่ารีเฟรชหรือเปลี่ยนหน้าเว็บ จนกว่าการชำระเงินจะสำเร็จ"
                 : "Do not refresh or close this page until payment is confirmed"}
             </div>
 
