@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useApp } from "../hooks/useApp";
 
-const LOGO_SRC = "/tidbaan/logo.png";
+const LOGO_SRC = "/logo.png";
 
 export default function Navbar({ page, setPage, cartCount, onCartOpen }) {
   const { lang, setLang, theme, setTheme, fontSize, setFontSize, t, baseFontSize } = useApp();

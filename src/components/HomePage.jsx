@@ -2,7 +2,7 @@ import { useApp } from "../hooks/useApp";
 import { siteInfo } from "../data/menuData";
 import MenuCard from "./MenuCard";
 
-const LOGO_SRC = "/tidbaan/logo.png";
+const LOGO_SRC = "/logo.png";
 
 export default function HomePage({ setPage, menu, addToCart, onItemClick }) {
   const { lang, t, baseFontSize } = useApp();
